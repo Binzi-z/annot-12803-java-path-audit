@@ -1,0 +1,54 @@
+# PathGuard CI 接入示例：三仓库同 job 扫描，基线外新增 error 阻断。
+name: pathguard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pathguard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo-controller
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/repo-common
+          path: repo-common
+          token: ${{ secrets.CI_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/repo-filter-plugin
+          path: repo-filter-plugin
+          token: ${{ secrets.CI_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+
+      # 增量变更清单（跨三仓库的仓库内相对路径）
+      - name: changed list
+        run: |
+          git -C repo-controller diff --name-only origin/main...HEAD > changed.txt || true
+
+      # 摘要缓存按仓库挂载复用；--baseline 指向主干基线 SARIF
+      - name: scan (incremental, block new only)
+        run: |
+          python -m analyzer.cli \
+            repo-controller repo-common repo-filter-plugin \
+            --out pathguard.sarif \
+            --cache-dir .pathguard-cache \
+            --baseline baseline/pathguard-main.sarif \
+            --changed-list changed.txt \
+            --metrics-out pathguard-metrics.json
+
+      - name: quality gates (recall/FPR/perf/determinism on synthetic corpus)
+        run: python tools/eval_harness.py
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: pathguard.sarif
+          category: pathguard
